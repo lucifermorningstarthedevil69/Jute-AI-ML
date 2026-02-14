@@ -3,168 +3,146 @@ import cv2
 import numpy as np
 from PIL import Image
 
-st.title("Jute Bag Lab Analyzer")
+st.title("Jute Fabric & Seam Stitch Analyzer")
 
-st.header("Select Test Type")
+st.write("Capture from phone camera OR upload images")
+
+# =========================
+# IMAGE INPUT OPTIONS
+# =========================
+
+fabric_img = st.camera_input("Capture Fabric (10x10 cm square visible)")
+fabric_upload = st.file_uploader("OR Upload Fabric Image", type=["jpg","png","jpeg"])
+
+st.markdown("---")
+
+st.subheader("Upload Seam Stitch Image (Bottom Edge)")
+stitches_upload = st.file_uploader("Upload Seam Stitch Image", type=["jpg","png","jpeg"])
 
 
-# -------- Function: Extract inside calibration square --------
-def extract_inside_square(frame):
+# =========================
+# FUNCTION: AUTO SQUARE DETECTION
+# =========================
+
+def detect_black_square(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    edges = cv2.Canny(blur, 50, 150)
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # detect dark region (faded black still works)
+    _, thresh = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)
 
-    largest_square = None
-    max_area = 0
-
-    for cnt in contours:
-        approx = cv2.approxPolyDP(cnt, 0.02 * cv2.arcLength(cnt, True), True)
-
-        if len(approx) == 4:
-            area = cv2.contourArea(cnt)
-            if area > 10000 and area > max_area:
-                largest_square = approx
-                max_area = area
-
-    if largest_square is None:
-        return None
-
-    pts = largest_square.reshape(4, 2)
-
-    rect = np.zeros((4, 2), dtype="float32")
-    s = pts.sum(axis=1)
-    rect[0] = pts[np.argmin(s)]
-    rect[2] = pts[np.argmax(s)]
-
-    diff = np.diff(pts, axis=1)
-    rect[1] = pts[np.argmin(diff)]
-    rect[3] = pts[np.argmax(diff)]
-
-    side = 500
-
-    dst = np.array([
-        [0, 0],
-        [side - 1, 0],
-        [side - 1, side - 1],
-        [0, side - 1]], dtype="float32")
-
-    M = cv2.getPerspectiveTransform(rect, dst)
-    warped = cv2.warpPerspective(frame, M, (side, side))
-
-    return warped
-
-
-# -------- Function: Count Ends & Picks --------
-def count_density(roi):
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-
-    blur = cv2.GaussianBlur(gray, (5,5), 0)
-    thresh = cv2.adaptiveThreshold(
-        blur, 255,
-        cv2.ADAPTIVE_THRESH_MEAN_C,
-        cv2.THRESH_BINARY_INV,
-        11, 2
-    )
-
-    vertical_projection = np.sum(thresh, axis=0)
-    ends = np.sum(vertical_projection > np.mean(vertical_projection))
-
-    horizontal_projection = np.sum(thresh, axis=1)
-    picks = np.sum(horizontal_projection > np.mean(horizontal_projection))
-
-    return ends, picks, thresh
-
-
-# -------- Function: Count Bottom Stitches --------
-def count_bottom_stitches(roi):
-    h, w, _ = roi.shape
-    bottom = roi[int(h*0.75):h, 0:w]
-
-    gray = cv2.cvtColor(bottom, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5,5), 0)
-
-    _, thresh = cv2.threshold(
-        blur, 0, 255,
-        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-    )
-
-    kernel = np.ones((3,3), np.uint8)
-    clean = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
-
-    contours, _ = cv2.findContours(
-        clean, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-    )
-
-    stitch_count = 0
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL,
+                                   cv2.CHAIN_APPROX_SIMPLE)
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if 80 < area < 3000:
-            stitch_count += 1
+        if area > 5000:  # ignore noise
+            approx = cv2.approxPolyDP(cnt,
+                                      0.02*cv2.arcLength(cnt, True),
+                                      True)
 
-    return stitch_count, clean
+            if len(approx) == 4:
+                x, y, w, h = cv2.boundingRect(approx)
+                roi = frame[y:y+h, x:x+w]
+
+                return roi, (x, y, w, h)
+
+    return None, None
 
 
-# =====================================================
-# 🧵 OPTION 1 — EDGE PICKS / FABRIC DENSITY
-# =====================================================
-st.subheader("🧵 Fabric Density Test (Ends & Picks)")
+# =========================
+# PROCESS FABRIC IMAGE
+# =========================
 
-density_file = st.file_uploader(
-    "Upload Image for Edge Picks / Fabric Density",
-    type=["jpg", "png", "jpeg"],
-    key="density"
-)
+frame = None
 
-if density_file is not None:
-    image = Image.open(density_file)
-    frame = np.array(image)
+if fabric_img is not None:
+    frame = np.array(Image.open(fabric_img))
 
-    st.image(frame, caption="Uploaded Fabric Image")
+elif fabric_upload is not None:
+    frame = np.array(Image.open(fabric_upload))
 
-    roi = extract_inside_square(frame)
 
-    if roi is None:
-        st.error("Calibration square not detected")
-    else:
-        st.image(roi, caption="10cm × 10cm Area")
+if frame is not None:
 
-        ends, picks, thresh = count_density(roi)
+    st.image(frame, caption="Input Fabric Image")
+
+    roi, rect = detect_black_square(frame)
+
+    if roi is not None:
+
+        x, y, w, h = rect
+
+        # draw overlay
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x,y), (x+w, y+h),
+                      (0,255,0), 3)
+
+        st.image(overlay,
+                 caption="Detected 10x10 cm Square")
+
+        st.subheader("Analyzing Inside Square")
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+        blur = cv2.GaussianBlur(gray, (5,5), 0)
+
+        thresh = cv2.adaptiveThreshold(
+            blur,255,
+            cv2.ADAPTIVE_THRESH_MEAN_C,
+            cv2.THRESH_BINARY_INV,
+            11,2
+        )
 
         st.image(thresh, caption="Processed Fabric")
 
+        # ===== Ends & Picks =====
+        vertical_projection = np.sum(thresh, axis=0)
+        ends = np.sum(vertical_projection >
+                      np.mean(vertical_projection))
+
+        horizontal_projection = np.sum(thresh, axis=1)
+        picks = np.sum(horizontal_projection >
+                       np.mean(horizontal_projection))
+
+        st.subheader("Fabric Results (10cm × 10cm)")
         st.write(f"Ends (Warp threads): {ends}")
         st.write(f"Picks (Weft threads): {picks}")
 
-
-# =====================================================
-# 🪡 OPTION 2 — SEAM STITCH TEST
-# =====================================================
-st.subheader("🪡 Seam Stitch Count Test")
-
-stitch_file = st.file_uploader(
-    "Upload Image for Seam Stitch Count",
-    type=["jpg", "png", "jpeg"],
-    key="stitch"
-)
-
-if stitch_file is not None:
-    image = Image.open(stitch_file)
-    frame = np.array(image)
-
-    st.image(frame, caption="Uploaded Seam Image")
-
-    roi = extract_inside_square(frame)
-
-    if roi is None:
-        st.error("Calibration square not detected")
     else:
-        st.image(roi, caption="10cm × 10cm Area")
+        st.warning("Black square not detected")
 
-        stitches, stitch_mask = count_bottom_stitches(roi)
 
-        st.image(stitch_mask, caption="Detected Bottom Stitches")
+# =========================
+# PROCESS SEAM STITCH IMAGE
+# =========================
 
-        st.write(f"Seam Stitches in 10cm area: {stitches}")
+if stitches_upload is not None:
+
+    seam_img = np.array(Image.open(stitches_upload))
+    st.image(seam_img, caption="Seam Stitch Image")
+
+    gray = cv2.cvtColor(seam_img, cv2.COLOR_BGR2GRAY)
+
+    blur = cv2.GaussianBlur(gray, (5,5), 0)
+
+    edges = cv2.Canny(blur, 50, 150)
+
+    lines = cv2.HoughLinesP(edges, 1, np.pi/180,
+                            80,
+                            minLineLength=30,
+                            maxLineGap=5)
+
+    stitch_count = 0
+
+    if lines is not None:
+        stitch_count = len(lines)
+
+        for line in lines:
+            x1,y1,x2,y2 = line[0]
+            cv2.line(seam_img, (x1,y1), (x2,y2),
+                     (0,255,0), 2)
+
+    st.image(seam_img, caption="Detected Stitches")
+
+    st.subheader("Seam Stitch Count (Bottom)")
+    st.write(f"Number of Stitches: {stitch_count}")
